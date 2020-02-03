@@ -222,7 +222,10 @@ func Send(ch *amqp.Channel, queueName string, priority int, task interface{}) er
 			Body:         body,
 		},
 	)
-	return fmt.Errorf("publish task: %w", err)
+	if err != nil {
+		return fmt.Errorf("publish task: %w", err)
+	}
+	return nil
 }
 
 func declare(c *amqp.Channel, name string) (amqp.Queue, error) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	jsoniter "github.com/json-iterator/go"
 	"github.com/streadway/amqp"
@@ -135,7 +136,11 @@ func (q *Queue) Consume(ctx context.Context, prefetch, workers int, f consumeFn)
 					log.Println("messages closed")
 					return
 				}
+			case <-time.After(1 * time.Minute):
+				log.Println("waiting tasks...")
+				continue
 			}
+
 			requeue, err := f(m)
 			if err != nil {
 				requeue = requeue || isCtxDone(ctx) != nil

@@ -53,6 +53,29 @@ func (q *Queue) Delete(force bool) (int, error) {
 	return q.ch.QueuePurge(q.queue, false)
 }
 
+func (q *Queue) SendRaw(priority int, body []byte) error {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+
+	err := sendRaw(q.ch, q.q.Name, priority, body)
+	if errors.Is(err, amqp.ErrClosed) {
+		log.Println("rabbit closed, reconnect")
+
+		err := q.Close()
+		if err != nil {
+			log.Println("close", err)
+		}
+
+		err = q.connect()
+		if err != nil {
+			return err
+		}
+
+		return sendRaw(q.ch, q.queue, priority, body)
+	}
+	return err
+}
+
 func (q *Queue) Send(priority int, task interface{}) error {
 	q.lock.Lock()
 	defer q.lock.Unlock()
@@ -208,13 +231,8 @@ func Read(from []byte, to interface{}) error {
 	return nil
 }
 
-func Send(ch *amqp.Channel, queueName string, priority int, task interface{}) error {
-	body, err := jsoniter.ConfigFastest.Marshal(task)
-	if err != nil {
-		return fmt.Errorf("marshal task: %w", err)
-	}
-
-	err = ch.Publish("", queueName, false, false,
+func sendRaw(ch *amqp.Channel, queueName string, priority int, body []byte) error {
+	err := ch.Publish("", queueName, false, false,
 		amqp.Publishing{
 			Priority:     uint8(priority),
 			DeliveryMode: amqp.Persistent,
@@ -226,6 +244,14 @@ func Send(ch *amqp.Channel, queueName string, priority int, task interface{}) er
 		return fmt.Errorf("publish task: %w", err)
 	}
 	return nil
+}
+
+func Send(ch *amqp.Channel, queueName string, priority int, task interface{}) error {
+	body, err := jsoniter.ConfigFastest.Marshal(task)
+	if err != nil {
+		return fmt.Errorf("marshal task: %w", err)
+	}
+	return sendRaw(ch, queueName, priority, body)
 }
 
 func declare(c *amqp.Channel, name string) (amqp.Queue, error) {

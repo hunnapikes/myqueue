@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"sync"
 
 	jsoniter "github.com/json-iterator/go"
@@ -113,7 +114,17 @@ func (q *Queue) Consume(ctx context.Context, prefetch, workers int, f consumeFn)
 					return
 				}
 			}
-			requeue, err := f(m)
+
+			var requeue bool
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						err = errors.New(fmt.Sprint(r))
+						log.Println("panic", err, string(debug.Stack()))
+					}
+				}()
+				requeue, err = f(m)
+			}()
 			if err != nil {
 				requeue = requeue || isCtxDone(ctx) != nil
 				log.Printf("worker error[%t]: %s\n", requeue, err)

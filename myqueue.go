@@ -14,13 +14,14 @@ import (
 )
 
 type Queue struct {
-	retry int //optional retry count
-	queue string
-	dsn   string
-	tag   string
-	conn  *amqp.Connection
-	ch    *amqp.Channel
-	q     amqp.Queue
+	retry       int //optional retry count
+	queue       string
+	dsn         string
+	tag         string
+	conn        *amqp.Connection
+	ch          *amqp.Channel
+	q           amqp.Queue
+	connectedAt time.Time
 
 	lock sync.Mutex
 }
@@ -56,19 +57,10 @@ func (q *Queue) Delete(force bool) (int, error) {
 }
 
 func (q *Queue) SendRaw(priority int, body []byte) error {
-	q.lock.Lock()
-	defer q.lock.Unlock()
-
 	err := sendRaw(q.ch, q.q.Name, priority, body)
 	if errors.Is(err, amqp.ErrClosed) {
 		log.Println("rabbit closed, reconnect")
-
-		err := q.Close()
-		if err != nil {
-			log.Println("close", err)
-		}
-
-		err = q.connect()
+		err = q.reconnect()
 		if err != nil {
 			return err
 		}
@@ -79,13 +71,24 @@ func (q *Queue) SendRaw(priority int, body []byte) error {
 }
 
 func (q *Queue) Send(priority int, task interface{}) error {
+	err := Send(q.ch, q.q.Name, priority, task)
+	if errors.Is(err, amqp.ErrClosed) {
+		err = q.reconnect()
+		if err != nil {
+			return err
+		}
+
+		return Send(q.ch, q.queue, priority, task)
+	}
+	return err
+}
+
+func (q *Queue) reconnect() error {
+	closedAt := time.Now()
 	q.lock.Lock()
 	defer q.lock.Unlock()
 
-	err := Send(q.ch, q.q.Name, priority, task)
-	if errors.Is(err, amqp.ErrClosed) {
-		log.Println("rabbit closed, reconnect")
-
+	if closedAt.After(q.connectedAt) {
 		err := q.Close()
 		if err != nil {
 			log.Println("close", err)
@@ -95,10 +98,9 @@ func (q *Queue) Send(priority int, task interface{}) error {
 		if err != nil {
 			return err
 		}
-
-		return Send(q.ch, q.queue, priority, task)
 	}
-	return err
+
+	return nil
 }
 
 var QueueClosedError = fmt.Errorf("queue closed")
@@ -217,6 +219,7 @@ func (q *Queue) connect() (err error) {
 		}
 		return err
 	}
+	q.connectedAt = time.Now()
 	return nil
 }
 

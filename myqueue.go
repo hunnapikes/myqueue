@@ -103,6 +103,10 @@ func (q *Queue) reconnect() error {
 	return nil
 }
 
+func (q *Queue) Messages(prefetch int) (<-chan amqp.Delivery, error){
+	return consume(q.ch, q.tag, q.queue, prefetch)
+}
+
 var QueueClosedError = fmt.Errorf("queue closed")
 
 type consumeFn func(m amqp.Delivery) (requeue bool, err error)

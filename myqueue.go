@@ -56,6 +56,14 @@ func (q *Queue) Delete(force bool) (int, error) {
 	return q.ch.QueuePurge(q.queue, false)
 }
 
+func (q *Queue) Count() (int, error) {
+	queue, err := q.ch.QueueInspect(q.queue)
+	if err != nil {
+		return 0, err
+	}
+	return queue.Messages, nil
+}
+
 func (q *Queue) SendRaw(priority int, body []byte) error {
 	err := sendRaw(q.ch, q.q.Name, priority, body)
 	if errors.Is(err, amqp.ErrClosed) {

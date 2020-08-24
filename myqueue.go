@@ -4,17 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"runtime/debug"
 	"sync"
 	"time"
 
 	jsoniter "github.com/json-iterator/go"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/streadway/amqp"
 )
 
+var json = jsoniter.ConfigFastest
+
 type Queue struct {
-	retry       int //optional retry count
 	queue       string
 	dsn         string
 	tag         string
@@ -39,7 +41,7 @@ func New(isDeclare bool, consumerTag, queue, dsn string) (*Queue, error) {
 		if err != nil {
 			closeErr := q.Close()
 			if closeErr != nil {
-				log.Println("close", err)
+				log.Err(err).Msg("close")
 			}
 			return nil, fmt.Errorf("declare queue: %w", err)
 		}
@@ -67,7 +69,7 @@ func (q *Queue) Count() (int, error) {
 func (q *Queue) SendRaw(priority int, body []byte) error {
 	err := sendRaw(q.ch, q.q.Name, priority, body)
 	if errors.Is(err, amqp.ErrClosed) {
-		log.Println("rabbit closed, reconnect")
+		log.Info().Msg("rabbit closed, reconnect")
 		err = q.reconnect()
 		if err != nil {
 			return err
@@ -99,7 +101,7 @@ func (q *Queue) reconnect() error {
 	if closedAt.After(q.connectedAt) {
 		err := q.Close()
 		if err != nil {
-			log.Println("close", err)
+			log.Err(err).Msg("close")
 		}
 
 		err = q.connect()
@@ -111,7 +113,7 @@ func (q *Queue) reconnect() error {
 	return nil
 }
 
-func (q *Queue) Messages(prefetch int) (<-chan amqp.Delivery, error){
+func (q *Queue) Messages(prefetch int) (<-chan amqp.Delivery, error) {
 	return consume(q.ch, q.tag, q.queue, prefetch)
 }
 
@@ -119,7 +121,7 @@ var QueueClosedError = fmt.Errorf("queue closed")
 
 type consumeFn func(m amqp.Delivery) (requeue bool, err error)
 
-func (q *Queue) Consume(ctx context.Context, prefetch, workers int, f consumeFn) error {
+func (q *Queue) Consume(log zerolog.Logger, ctx context.Context, prefetch, workers int, f consumeFn) error {
 	if workers == 0 {
 		return fmt.Errorf("0 workers")
 	}
@@ -131,12 +133,12 @@ func (q *Queue) Consume(ctx context.Context, prefetch, workers int, f consumeFn)
 		return fmt.Errorf("consume: %w", err)
 	}
 
-	worker(workers, func() {
+	worker(workers, func(ind int) {
 		var ok bool
 		for {
 			// приоритеней чекнуть контекст
 			if err := isCtxDone(ctx); err != nil {
-				log.Println("context done")
+				log.Info().Msg("context done")
 				return
 			}
 
@@ -144,15 +146,21 @@ func (q *Queue) Consume(ctx context.Context, prefetch, workers int, f consumeFn)
 			select {
 			//на случай если нет тасок
 			case <-ctx.Done():
-				log.Println("context done")
+				if ind == 0 {
+					log.Info().Msg("context done")
+				}
 				return
 			case m, ok = <-msgs:
 				if !ok {
-					log.Println("messages closed")
+					if ind == 0 {
+						log.Info().Msg("messages closed")
+					}
 					return
 				}
 			case <-time.After(1 * time.Minute):
-				log.Println("waiting tasks...")
+				if ind == 0 {
+					log.Debug().Msg("waiting tasks...")
+				}
 				continue
 			}
 
@@ -161,7 +169,10 @@ func (q *Queue) Consume(ctx context.Context, prefetch, workers int, f consumeFn)
 				defer func() {
 					if r := recover(); r != nil {
 						err = errors.New(fmt.Sprint(r))
-						log.Println("panic", err, string(debug.Stack()))
+						log.Info().
+							Str("stack", string(debug.Stack())).
+							Err(err).
+							Msg("panic")
 					}
 					requeue = true
 				}()
@@ -172,12 +183,12 @@ func (q *Queue) Consume(ctx context.Context, prefetch, workers int, f consumeFn)
 				log.Printf("worker error[%t]: %s\n", requeue, err)
 				err := m.Nack(false, requeue)
 				if err != nil {
-					log.Println("nack error:", err)
+					log.Err(err).Msg("nack error")
 				}
 			} else {
 				err := m.Ack(false)
 				if err != nil {
-					log.Println("ack error:", err)
+					log.Err(err).Msg("ack error")
 				}
 			}
 		}
@@ -191,15 +202,15 @@ func (q *Queue) Consume(ctx context.Context, prefetch, workers int, f consumeFn)
 	}
 }
 
-func worker(count int, f, callback func()) {
+func worker(count int, f func(index int), callback func()) {
 	wg := sync.WaitGroup{}
 
 	for i := 1; i <= count; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			f()
-		}()
+			f(i)
+		}(i)
 	}
 	wg.Wait()
 
@@ -228,7 +239,7 @@ func (q *Queue) connect() (err error) {
 	if err != nil {
 		closeErr := q.conn.Close()
 		if closeErr != nil {
-			log.Println("close connection:", err)
+			log.Err(err).Msg("close connection")
 		}
 		return err
 	}
@@ -251,13 +262,12 @@ func (q *Queue) Close() error {
 const MaxPriority = 9
 
 func Read(from []byte, to interface{}) error {
-	iter := jsoniter.ConfigFastest.BorrowIterator(from)
+	iter := json.BorrowIterator(from)
+	defer json.ReturnIterator(iter)
 	iter.ReadVal(&to)
-	if err := iter.Error; err != nil {
-		jsoniter.ConfigFastest.ReturnIterator(iter)
+	if iter.Error != nil {
 		return fmt.Errorf("unmarshal '%s': %w", from, iter.Error)
 	}
-	jsoniter.ConfigFastest.ReturnIterator(iter)
 
 	return nil
 }
@@ -278,7 +288,7 @@ func sendRaw(ch *amqp.Channel, queueName string, priority int, body []byte) erro
 }
 
 func Send(ch *amqp.Channel, queueName string, priority int, task interface{}) error {
-	body, err := jsoniter.ConfigFastest.Marshal(task)
+	body, err := json.Marshal(task)
 	if err != nil {
 		return fmt.Errorf("marshal task: %w", err)
 	}

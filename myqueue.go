@@ -163,6 +163,7 @@ func (q *Queue) Consume(ctx context.Context, prefetch, workers int, f consumeFn)
 						err = errors.New(fmt.Sprint(r))
 						log.Println("panic", err, string(debug.Stack()))
 					}
+					requeue = true
 				}()
 				requeue, err = f(m)
 			}()
